@@ -267,7 +267,7 @@ nav.primary-nav button.active { background: var(--accent); color: var(--accent-i
 .btn-outline { background: transparent; border-color: var(--accent); color: var(--accent); }
 .btn-outline:hover { background: var(--accent); color: var(--accent-ink); }
 .btn-sm { padding: 6px 13px; font-size: 0.78rem; }
-.btn-icon { border-radius: 50%; width: 38px; height: 38px; padding: 0; background: var(--surface-alt); border: none; position: relative; cursor: pointer; }
+.btn-icon { border-radius: 50%; width: 38px; height: 38px; padding: 0; background: var(--surface-alt); border: none; position: relative; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; color: var(--ink); }
 .btn-icon:hover { background: var(--border-strong); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
 
