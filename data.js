@@ -6,9 +6,137 @@ const CONFIG = {
   SCHOOL: 'AURAK',
   SCHOOL_FULL: 'American University of Ras Al Khaimah',
   EMAIL_DOMAIN: '@aurak.ac.ae',
+  SUPABASE_URL: 'https://obnwttzgolmejwgzhwro.supabase.co',
+  SUPABASE_KEY: 'sb_publishable_0kCfafrxnhQZi_fF26bM3A_qH-8lnDC',
 };
 
 function premiumPriceLabel() { return `${CONFIG.CURRENCY} ${CONFIG.PREMIUM_PRICE}/month`; }
+
+// a per-browser id so reactions (like/dislike) don't double-count from the same device — not a real identity
+function deviceId() {
+  try {
+    let id = localStorage.getItem('universe_device_id');
+    if (!id) { id = crypto.randomUUID(); localStorage.setItem('universe_device_id', id); }
+    return id;
+  } catch (e) { return 'anon-' + Math.random().toString(36).slice(2); }
+}
+
+// Thin wrapper around Supabase — the shared backend for posts, comments, reactions and professor reviews.
+// Everything else in the app (events, businesses, chat, perks) stays demo/local-only for now.
+const db = (function () {
+  const client = (typeof supabase !== 'undefined')
+    ? supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_KEY)
+    : null;
+
+  async function fetchPosts() {
+    const { data, error } = await client
+      .from('posts')
+      .select('*, comments(*)')
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    data.forEach(p => p.comments.sort((a, b) => new Date(a.created_at) - new Date(b.created_at)));
+    return data;
+  }
+
+  async function fetchMyReactions() {
+    const { data, error } = await client.from('reactions').select('post_id, kind').eq('device_id', deviceId());
+    if (error) throw error;
+    const map = {};
+    data.forEach(r => { map[r.post_id] = r.kind; });
+    return map;
+  }
+
+  async function submitPost(authorName, authorTier, authorMajor, text) {
+    const mod = moderateText(text);
+    const { data, error } = await client.from('posts').insert({
+      author_name: authorName, author_tier: authorTier, author_major: authorMajor,
+      text, status: mod.status, mod_reason: mod.reason,
+    }).select('*, comments(*)').single();
+    if (error) throw error;
+    return { post: data, mod };
+  }
+
+  async function submitComment(postId, authorName, text) {
+    const mod = moderateText(text);
+    const { data, error } = await client.from('comments').insert({
+      post_id: postId, author_name: authorName, text, status: mod.status, mod_reason: mod.reason,
+    }).select().single();
+    if (error) throw error;
+    return { comment: data, mod };
+  }
+
+  // always re-reads the post's current counts from the server right before writing, so an
+  // already-optimistic local post object (mutated for instant UI feedback) can't get double-counted.
+  // Reading then writing still isn't atomic under heavy concurrency, but this demo has light traffic.
+  async function react(postId, kind) {
+    const did = deviceId();
+    const [{ data: existing }, { data: current, error: fetchError }] = await Promise.all([
+      client.from('reactions').select('kind').eq('post_id', postId).eq('device_id', did).maybeSingle(),
+      client.from('posts').select('likes, dislikes').eq('id', postId).single(),
+    ]);
+    if (fetchError) throw fetchError;
+    const counts = { likes: current.likes, dislikes: current.dislikes };
+    if (existing && existing.kind === kind) {
+      await client.from('reactions').delete().eq('post_id', postId).eq('device_id', did);
+      counts[kind === 'like' ? 'likes' : 'dislikes']--;
+    } else if (existing) {
+      await client.from('reactions').update({ kind }).eq('post_id', postId).eq('device_id', did);
+      counts[existing.kind === 'like' ? 'likes' : 'dislikes']--;
+      counts[kind === 'like' ? 'likes' : 'dislikes']++;
+    } else {
+      await client.from('reactions').insert({ post_id: postId, device_id: did, kind });
+      counts[kind === 'like' ? 'likes' : 'dislikes']++;
+    }
+    const { data, error } = await client.from('posts').update(counts).eq('id', postId).select().single();
+    if (error) throw error;
+    return { likes: data.likes, dislikes: data.dislikes, mine: existing && existing.kind === kind ? null : kind };
+  }
+
+  async function modDecidePost(postId, approve) {
+    if (approve) await client.from('posts').update({ status: 'approved' }).eq('id', postId);
+    else await client.from('posts').delete().eq('id', postId);
+  }
+  async function modDecideComment(commentId, approve) {
+    if (approve) await client.from('comments').update({ status: 'approved' }).eq('id', commentId);
+    else await client.from('comments').delete().eq('id', commentId);
+  }
+
+  async function fetchAllReviews() {
+    const { data, error } = await client.from('professor_reviews').select('*').order('created_at', { ascending: false });
+    if (error) throw error;
+    return data;
+  }
+
+  async function submitReview(professorId, authorName, anonymous, course, semester, ratings, text) {
+    const mod = moderateText(text);
+    const { data, error } = await client.from('professor_reviews').insert({
+      professor_id: professorId, author_name: authorName, anonymous, course, semester, ratings, text,
+      status: mod.status,
+    }).select().single();
+    if (error) throw error;
+    return { review: data, mod };
+  }
+
+  async function reportReview(reviewId, currentReports) {
+    await client.from('professor_reviews').update({ reports: (currentReports || 0) + 1 }).eq('id', reviewId);
+  }
+  async function modDecideReview(reviewId, approve) {
+    if (approve) await client.from('professor_reviews').update({ status: 'approved', reports: 0 }).eq('id', reviewId);
+    else await client.from('professor_reviews').delete().eq('id', reviewId);
+  }
+
+  function onChange(tables, cb) {
+    const channel = client.channel('universe-live');
+    tables.forEach(t => channel.on('postgres_changes', { event: '*', schema: 'public', table: t }, cb));
+    channel.subscribe();
+    return channel;
+  }
+
+  return {
+    fetchPosts, fetchMyReactions, submitPost, submitComment, react, modDecidePost, modDecideComment,
+    fetchAllReviews, submitReview, reportReview, modDecideReview, onChange,
+  };
+})();
 
 // crude heuristic placeholder for a real moderation service — flags obvious abuse, never blocks ordinary criticism
 const MODERATION_BLOCKLIST = [
@@ -110,10 +238,11 @@ const PROFESSORS = [
   },
 ];
 
-function realReviews(prof) { return prof.reviews.filter(r => r.status === 'approved'); }
+// both take a plain array of review rows for one professor (fetched from the shared backend)
+function realReviews(reviews) { return reviews.filter(r => r.status === 'approved'); }
 
-function avgRating(prof, key = 'overall') {
-  const approved = realReviews(prof);
+function avgRating(reviews, key = 'overall') {
+  const approved = realReviews(reviews);
   if (!approved.length) return 0;
   return approved.reduce((s, r) => s + r.ratings[key], 0) / approved.length;
 }

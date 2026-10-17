@@ -24,6 +24,16 @@
     const d = new Date(iso + 'T00:00:00');
     return d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
   }
+  function timeAgo(iso) {
+    const diffMs = Date.now() - new Date(iso).getTime();
+    const mins = Math.floor(diffMs / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    const days = Math.floor(hrs / 24);
+    return `${days}d ago`;
+  }
   function clone(x) { return JSON.parse(JSON.stringify(x)); }
 
   // ---------- state ----------
@@ -37,13 +47,16 @@
         privacy: { showMajor: true, showYear: true, showBusiness: true },
         adminDemo: true,
       },
-      posts: clone(POSTS),
+      posts: [], // shared — fetched from Supabase, not persisted locally
+      postsLoading: true,
+      postsOffline: false,
       professors: clone(PROFESSORS),
+      reviews: [], // shared — fetched from Supabase, not persisted locally
       events: clone(EVENTS),
       businesses: clone(BUSINESSES),
       channels: clone(CHAT_CHANNELS),
       notifications: clone(NOTIFICATIONS),
-      myReactions: {}, // postId -> 'like' | 'dislike'
+      myReactions: {}, // postId -> 'like' | 'dislike' — fetched from Supabase for this device
       discountCodesUsed: {},
     };
   }
@@ -58,7 +71,10 @@
     } catch (e) { return defaultState(); }
   }
   function saveState() {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) { /* storage unavailable, demo continues in-memory */ }
+    try {
+      const { posts, postsLoading, postsOffline, reviews, myReactions, ...persisted } = state;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
+    } catch (e) { /* storage unavailable, demo continues in-memory */ }
   }
 
   // ephemeral UI state — not persisted
@@ -91,6 +107,9 @@
     if (id === 'me') return { id: 'me', name: state.me.name || 'You', major: state.me.major, year: state.me.year, tier: state.me.tier };
     return studentById(id) || { id, name: 'Former Student', major: '', year: '', tier: 'free' };
   }
+  // posts/comments from Supabase carry their own display fields (no local author lookup)
+  function postAuthor(post) { return { id: post.author_name, name: post.author_name, tier: post.author_tier, major: post.author_major }; }
+  function commentAuthor(c) { return { id: c.author_name, name: c.author_name, tier: 'free' }; }
   function avatarHtml(author, size) {
     size = size || 36;
     const color = avatarColor(author.id);
@@ -247,7 +266,7 @@
 
   function renderDashboardHeader() {
     const me = state.me;
-    const myPostCount = state.posts.filter(p => p.authorId === 'me').length;
+    const myPostCount = state.posts.filter(p => p.author_name === state.me.name).length;
     const unread = state.notifications.filter(n => n.unread).length;
     const upcomingCount = state.events.filter(e => e.status === 'approved').length;
     return `
@@ -283,8 +302,11 @@
     const trending = [...state.posts].filter(p => p.status === 'approved').sort((a, b) => b.likes - a.likes).slice(0, 2);
     const upcoming = state.events.filter(e => e.status === 'approved').slice(0, 2);
     const featuredBiz = state.businesses.filter(b => b.featured && b.status === 'approved').slice(0, 2);
-    const ratedProfs = state.professors.filter(p => realReviews(p).length > 0);
-    const topProf = ratedProfs.length ? [...ratedProfs].sort((a, b) => avgRating(b) - avgRating(a))[0] : null;
+    const reviewsByProf = state.professors.map(p => ({ prof: p, reviews: state.reviews.filter(r => r.professor_id === p.id) }));
+    const ratedProfs = reviewsByProf.filter(x => realReviews(x.reviews).length > 0);
+    const top = ratedProfs.length ? [...ratedProfs].sort((a, b) => avgRating(b.reviews) - avgRating(a.reviews))[0] : null;
+    const topProf = top ? top.prof : null;
+    const topProfReviews = top ? top.reviews : [];
 
     const heroBlock = state.loggedIn ? renderDashboardHeader() : `
     <section class="hero">
@@ -352,7 +374,7 @@
             <strong style="font-size:1.05rem">${escapeHtml(topProf.name)}</strong>
             <div class="muted" style="font-size:0.84rem">${escapeHtml(topProf.department)}</div>
           </div>
-          <div class="stars">${starString(avgRating(topProf))} <span class="muted mono" style="margin-left:6px">${avgRating(topProf).toFixed(1)}</span></div>
+          <div class="stars">${starString(avgRating(topProfReviews))} <span class="muted mono" style="margin-left:6px">${avgRating(topProfReviews).toFixed(1)}</span></div>
         </div>` : `
         <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
           <span class="muted">No professor ratings yet — real student reviews will appear here first.</span>
@@ -375,9 +397,10 @@
 
   // ---------------- COMMUNITY ----------------
   function pageCommunity() {
-    const visible = state.posts.filter(p => p.status === 'approved' || p.authorId === 'me');
+    const visible = state.posts.filter(p => p.status === 'approved' || p.author_name === state.me.name);
     return `
     <div class="section-head"><h2>Campus Community Feed</h2></div>
+    ${state.postsOffline ? `<div class="card card-pad" style="background:var(--warning-bg);border:none;margin-bottom:16px">⚠️ Live sync is unavailable right now — showing a local snapshot. New posts and comments won't be shared until it reconnects.</div>` : ''}
     <div class="card card-pad composer">
       ${avatarHtml(authorById('me'), 40)}
       <div style="flex:1">
@@ -385,7 +408,7 @@
           <textarea id="composer-text" placeholder="${isPremium() ? "Share something with campus…" : 'Upgrade to Premium to post in the community.'}" ${isPremium() ? '' : 'disabled'}></textarea>
         </div>
         <div class="composer-row">
-          <span class="lock-note">${isPremium() ? 'Posts are checked by AI moderation before they appear publicly.' : '🔒 Free members can view, like and dislike — Premium can post and comment.'}</span>
+          <span class="lock-note">${isPremium() ? 'Posts are checked by AI moderation before they appear publicly and are visible to everyone.' : '🔒 Free members can view, like and dislike — Premium can post and comment.'}</span>
           ${isPremium()
             ? `<button class="btn btn-primary btn-sm" data-action="submit-post">Post</button>`
             : `<button class="btn btn-outline btn-sm" data-action="open-auth" data-tab="register">Upgrade to Premium</button>`}
@@ -393,13 +416,13 @@
       </div>
     </div>
     <div class="section" style="margin-top:24px;display:grid;gap:16px">
-      ${visible.slice().reverse().map(p => renderPostCard(p, {})).join('')}
+      ${state.postsLoading ? '<p class="muted" style="text-align:center;padding:30px">Loading the community feed…</p>' : visible.map(p => renderPostCard(p, {})).join('') || '<p class="muted" style="text-align:center;padding:30px">No posts yet — be the first to share something.</p>'}
     </div>
     `;
   }
 
   function renderCommentRow(c) {
-    const ca = authorById(c.authorId);
+    const ca = commentAuthor(c);
     const reviewTag = c.status === 'pending' ? ' <span class="pill pill-warning" style="margin-left:4px">Under review</span>' : '';
     return `<div class="comment">${avatarHtml(ca, 28)}<div class="comment-bubble"><b>${escapeHtml(ca.name)}</b><br>${escapeHtml(c.text)}${reviewTag}</div></div>`;
   }
@@ -427,10 +450,10 @@
   }
 
   function renderPostCard(post, opts) {
-    const author = authorById(post.authorId);
+    const author = postAuthor(post);
     const myReaction = state.myReactions[post.id];
     const commentsOpen = !!ui.expandedComments[post.id];
-    const visibleComments = post.comments.filter(c => c.status === 'approved' || c.authorId === 'me');
+    const visibleComments = post.comments.filter(c => c.status === 'approved' || c.author_name === state.me.name);
     const majorPill = author.major ? `<span class="pill pill-outline">${escapeHtml(author.major)}</span>` : '';
     const reviewPill = post.status === 'pending' ? '<span class="pill pill-warning">Under review</span>' : '';
     const footer = opts.compact ? '' : renderPostActions(post, author, myReaction, commentsOpen, visibleComments);
@@ -442,7 +465,7 @@
           <span class="post-name">${escapeHtml(author.name)}</span>
           ${tierBadge(author.tier)}
           ${majorPill}
-          <span class="post-meta">· ${escapeHtml(post.time)}</span>
+          <span class="post-meta">· ${escapeHtml(timeAgo(post.created_at))}</span>
           ${reviewPill}
         </div>
         <div class="post-text">${escapeHtml(post.text)}</div>
@@ -570,7 +593,8 @@
 
   function renderProfessorCard(p) {
     const expanded = ui.expandedProf === p.id;
-    const approved = realReviews(p);
+    const profReviews = state.reviews.filter(r => r.professor_id === p.id);
+    const approved = realReviews(profReviews);
     const rated = approved.length > 0;
     return `<div class="card card-pad">
       <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;cursor:pointer" data-action="toggle-prof" data-id="${p.id}">
@@ -580,13 +604,13 @@
           <div class="chip-row" style="margin-top:8px">${p.courses.map(c => `<span class="pill pill-outline">${escapeHtml(c)}</span>`).join('')}</div>
         </div>
         <div style="text-align:right">
-          ${rated ? `<div class="stars">${starString(avgRating(p))}</div><div class="muted" style="font-size:0.78rem">${approved.length} review${approved.length === 1 ? '' : 's'}</div>`
+          ${rated ? `<div class="stars">${starString(avgRating(profReviews))}</div><div class="muted" style="font-size:0.78rem">${approved.length} review${approved.length === 1 ? '' : 's'}</div>`
                   : `<span class="pill pill-outline">Not Yet Rated</span>`}
         </div>
       </div>
       ${expanded ? `
       <div style="margin-top:16px;padding-top:16px;border-top:1px dashed var(--border)">
-        ${rated ? RATING_CATEGORIES.map(([key, label]) => `<div class="rating-row"><span>${label}</span><div class="rating-track"><div class="rating-fill" style="width:${avgRating(p, key) / 5 * 100}%"></div></div><span class="mono">${avgRating(p, key).toFixed(1)}</span></div>`).join('')
+        ${rated ? RATING_CATEGORIES.map(([key, label]) => `<div class="rating-row"><span>${label}</span><div class="rating-track"><div class="rating-fill" style="width:${avgRating(profReviews, key) / 5 * 100}%"></div></div><span class="mono">${avgRating(profReviews, key).toFixed(1)}</span></div>`).join('')
           : `<div class="card card-pad" style="background:var(--surface-alt);border:none;display:grid;gap:6px;font-size:0.86rem">
               <div><b>Exam Difficulty:</b> <span class="muted">Awaiting verified student ratings</span></div>
               <div><b>Teaching Style:</b> <span class="muted">Awaiting student feedback</span></div>
@@ -613,12 +637,12 @@
           <div style="display:grid;gap:10px">
             ${approved.map(r => `<div class="card card-pad" style="background:var(--surface-alt);border:none">
               <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
-                <b>${r.anonymous ? 'Anonymous student' : escapeHtml(authorById(r.authorId).name)}</b>
+                <b>${r.anonymous ? 'Anonymous student' : escapeHtml(r.author_name)}</b>
                 <span class="stars" style="font-size:0.85rem">${starString(r.ratings.overall)}</span>
               </div>
               <div class="muted" style="font-size:0.76rem;margin-top:2px">${escapeHtml(r.course || '')}${r.semester ? ' · ' + escapeHtml(r.semester) : ''}</div>
               <p style="margin:6px 0 8px;font-size:0.88rem">${escapeHtml(r.text)}</p>
-              <button class="see-all" style="font-size:0.72rem" data-action="report-review" data-prof="${p.id}" data-review="${r.id}">Report review</button>
+              <button class="see-all" style="font-size:0.72rem" data-action="report-review" data-review="${r.id}">Report review</button>
             </div>`).join('') || '<p class="muted" style="font-size:0.84rem">No student reviews yet — be the first to share yours.</p>'}
           </div>
         </div>
@@ -735,7 +759,7 @@
   // ---------------- PROFILE ----------------
   function pageProfile() {
     const me = state.me;
-    const myPosts = state.posts.filter(p => p.authorId === 'me');
+    const myPosts = state.posts.filter(p => p.author_name === state.me.name);
     const myBiz = state.businesses.find(b => b.ownerId === 'me');
     return `
     <div class="section-head"><h2>My Profile</h2></div>
@@ -804,8 +828,8 @@
   // ---------------- ADMIN ----------------
   function pageAdmin() {
     const flaggedPosts = state.posts.filter(p => p.status === 'pending');
-    const flaggedComments = state.posts.flatMap(p => p.comments.filter(c => c.status === 'pending').map(c => ({ ...c, postId: p.id })));
-    const flaggedReviews = state.professors.flatMap(p => p.reviews.filter(r => r.status === 'pending' || r.reports > 0).map(r => ({ ...r, profId: p.id, profName: p.name })));
+    const flaggedComments = state.posts.flatMap(p => p.comments.filter(c => c.status === 'pending'));
+    const flaggedReviews = state.reviews.filter(r => r.status === 'pending' || r.reports > 0).map(r => ({ ...r, profName: (state.professors.find(p => p.id === r.professor_id) || {}).name || r.professor_id }));
     const pendingEvents = state.events.filter(e => e.status === 'pending');
     const pendingBiz = state.businesses.filter(b => b.status === 'pending');
     const premiumCount = STUDENTS.filter(s => s.tier === 'premium').length + (isPremium() ? 1 : 0);
@@ -824,9 +848,9 @@
       <div class="table-wrap"><table class="data-table">
         <thead><tr><th>Type</th><th>Author</th><th>Content</th><th>Reason</th><th>Actions</th></tr></thead>
         <tbody>
-          ${flaggedPosts.map(p => `<tr><td>Post</td><td>${escapeHtml(authorById(p.authorId).name)}</td><td style="max-width:260px">${escapeHtml(p.text).slice(0, 80)}</td><td class="muted">${escapeHtml(p.modReason || 'Flagged by AI moderation')}</td><td><button class="btn btn-secondary btn-sm" data-action="mod-approve" data-type="post" data-id="${p.id}">Approve</button> <button class="btn btn-ghost btn-sm" data-action="mod-reject" data-type="post" data-id="${p.id}">Reject</button></td></tr>`).join('')}
-          ${flaggedComments.map(c => `<tr><td>Comment</td><td>${escapeHtml(authorById(c.authorId).name)}</td><td style="max-width:260px">${escapeHtml(c.text).slice(0, 80)}</td><td class="muted">${escapeHtml(c.modReason || 'Flagged by AI moderation')}</td><td><button class="btn btn-secondary btn-sm" data-action="mod-approve" data-type="comment" data-id="${c.id}" data-post="${c.postId}">Approve</button> <button class="btn btn-ghost btn-sm" data-action="mod-reject" data-type="comment" data-id="${c.id}" data-post="${c.postId}">Reject</button></td></tr>`).join('')}
-          ${flaggedReviews.map(r => `<tr><td>Review</td><td>${r.anonymous ? 'Anonymous' : escapeHtml(authorById(r.authorId).name)}</td><td style="max-width:260px">${escapeHtml(r.text).slice(0, 80)} <span class="muted">(${escapeHtml(r.profName)})</span></td><td class="muted">${r.reports ? r.reports + ' report(s)' : 'Flagged by AI moderation'}</td><td><button class="btn btn-secondary btn-sm" data-action="mod-approve" data-type="review" data-id="${r.id}" data-post="${r.profId}">Approve</button> <button class="btn btn-ghost btn-sm" data-action="mod-reject" data-type="review" data-id="${r.id}" data-post="${r.profId}">Reject</button></td></tr>`).join('')}
+          ${flaggedPosts.map(p => `<tr><td>Post</td><td>${escapeHtml(p.author_name)}</td><td style="max-width:260px">${escapeHtml(p.text).slice(0, 80)}</td><td class="muted">${escapeHtml(p.mod_reason || 'Flagged by AI moderation')}</td><td><button class="btn btn-secondary btn-sm" data-action="mod-approve" data-type="post" data-id="${p.id}">Approve</button> <button class="btn btn-ghost btn-sm" data-action="mod-reject" data-type="post" data-id="${p.id}">Reject</button></td></tr>`).join('')}
+          ${flaggedComments.map(c => `<tr><td>Comment</td><td>${escapeHtml(c.author_name)}</td><td style="max-width:260px">${escapeHtml(c.text).slice(0, 80)}</td><td class="muted">${escapeHtml(c.mod_reason || 'Flagged by AI moderation')}</td><td><button class="btn btn-secondary btn-sm" data-action="mod-approve" data-type="comment" data-id="${c.id}" data-post="${c.post_id}">Approve</button> <button class="btn btn-ghost btn-sm" data-action="mod-reject" data-type="comment" data-id="${c.id}" data-post="${c.post_id}">Reject</button></td></tr>`).join('')}
+          ${flaggedReviews.map(r => `<tr><td>Review</td><td>${r.anonymous ? 'Anonymous' : escapeHtml(r.author_name)}</td><td style="max-width:260px">${escapeHtml(r.text).slice(0, 80)} <span class="muted">(${escapeHtml(r.profName)})</span></td><td class="muted">${r.reports ? r.reports + ' report(s)' : 'Flagged by AI moderation'}</td><td><button class="btn btn-secondary btn-sm" data-action="mod-approve" data-type="review" data-id="${r.id}">Approve</button> <button class="btn btn-ghost btn-sm" data-action="mod-reject" data-type="review" data-id="${r.id}">Reject</button></td></tr>`).join('')}
           ${(!flaggedPosts.length && !flaggedComments.length && !flaggedReviews.length) ? '<tr><td colspan="5" class="muted" style="text-align:center;padding:20px">Queue is empty — nothing waiting on a human.</td></tr>' : ''}
         </tbody>
       </table></div>
@@ -1089,7 +1113,7 @@
         rerender(); break;
       }
       case 'submit-review': submitReview(target.getAttribute('data-prof')); break;
-      case 'report-review': reportReview(target.getAttribute('data-prof'), target.getAttribute('data-review')); break;
+      case 'report-review': reportReview(target.getAttribute('data-review')); break;
       case 'open-edit-profile': ui.modal = 'edit-profile'; ui.openDropdown = null; rerender(); break;
       case 'save-profile': saveProfile(); break;
       case 'set-channel': ui.activeChannel = id; rerender(); break;
@@ -1160,35 +1184,49 @@
     go('home');
   }
 
-  function reactToPost(id, kind) {
+  async function reactToPost(id, kind) {
     const post = state.posts.find(p => p.id === id);
     if (!post) return;
-    const prev = state.myReactions[id];
-    if (prev === 'like') post.likes--; if (prev === 'dislike') post.dislikes--;
-    if (prev === kind) { delete state.myReactions[id]; }
-    else { state.myReactions[id] = kind; if (kind === 'like') post.likes++; else post.dislikes++; }
+    const prevReaction = state.myReactions[id];
+    // optimistic update so it feels instant; db.react() below reconciles the real counts
+    const optimistic = { ...post };
+    if (prevReaction === 'like') optimistic.likes--; if (prevReaction === 'dislike') optimistic.dislikes--;
+    if (prevReaction !== kind) { optimistic[kind === 'like' ? 'likes' : 'dislikes']++; }
+    Object.assign(post, optimistic);
+    state.myReactions[id] = prevReaction === kind ? undefined : kind;
     rerender();
+    try {
+      const result = await db.react(id, kind);
+      post.likes = result.likes; post.dislikes = result.dislikes;
+      if (result.mine) state.myReactions[id] = result.mine; else delete state.myReactions[id];
+      rerender();
+    } catch (e) { toast('Could not save your reaction — check your connection.'); }
   }
 
-  function submitPost() {
-    const text = document.getElementById('composer-text').value.trim();
+  async function submitPost() {
+    const textEl = document.getElementById('composer-text');
+    const text = textEl.value.trim();
     if (!text) return;
-    const mod = moderateText(text);
-    const post = { id: uid('post'), authorId: 'me', time: 'just now', text, likes: 0, dislikes: 0, status: mod.status, comments: [], modReason: mod.reason };
-    state.posts.push(post);
-    toast(mod.status === 'approved' ? 'Posted to the community feed.' : mod.reason);
-    rerender();
+    textEl.disabled = true;
+    try {
+      const { post, mod } = await db.submitPost(state.me.name, state.me.tier, state.me.major, text);
+      state.posts.unshift(post);
+      toast(mod.status === 'approved' ? 'Posted to the community feed — everyone can see it.' : mod.reason);
+      rerender();
+    } catch (e) { toast('Could not post — check your connection and try again.'); rerender(); }
   }
 
-  function submitComment(postId) {
+  async function submitComment(postId) {
     const input = document.getElementById('comment-input-' + postId);
     const text = input.value.trim();
     if (!text) return;
-    const post = state.posts.find(p => p.id === postId);
-    const mod = moderateText(text);
-    post.comments.push({ id: uid('cm'), authorId: 'me', text, status: mod.status, modReason: mod.reason });
-    toast(mod.status === 'approved' ? 'Comment posted.' : mod.reason);
-    rerender();
+    try {
+      const { comment, mod } = await db.submitComment(postId, state.me.name, text);
+      const post = state.posts.find(p => p.id === postId);
+      if (post) post.comments.push(comment);
+      toast(mod.status === 'approved' ? 'Comment posted — everyone can see it.' : mod.reason);
+      rerender();
+    } catch (e) { toast('Could not post your comment — check your connection.'); }
   }
 
   function submitEvent() {
@@ -1219,25 +1257,31 @@
     rerender();
   }
 
-  function submitReview(profId) {
+  async function submitReview(profId) {
     const text = document.getElementById('review-text').value.trim();
     const anonymous = document.getElementById('review-anon').checked;
     const course = document.getElementById('review-course').value;
     const semester = document.getElementById('review-semester').value.trim();
     const ratings = ui.modalData.ratings;
     if (!text || Object.values(ratings).some(v => !v)) { toast('Rate every category and write a short review.'); return; }
-    const prof = state.professors.find(p => p.id === profId);
-    const mod = moderateText(text);
-    prof.reviews.push({ id: uid('r'), authorId: 'me', anonymous, course, semester, ratings, text, status: mod.status, reports: 0, modReason: mod.reason });
-    ui.modal = null;
-    toast(mod.status === 'approved' ? 'Review published. Thanks for the feedback.' : mod.reason + ' You can appeal from your profile if this seems wrong.');
-    rerender();
+    try {
+      const { review, mod } = await db.submitReview(profId, state.me.name, anonymous, course, semester, ratings, text);
+      state.reviews.unshift(review);
+      ui.modal = null;
+      toast(mod.status === 'approved' ? 'Review published for everyone to see. Thanks for the feedback.' : mod.reason + ' You can appeal from your profile if this seems wrong.');
+      rerender();
+    } catch (e) { toast('Could not submit your review — check your connection.'); }
   }
 
-  function reportReview(profId, reviewId) {
-    const prof = state.professors.find(p => p.id === profId);
-    const review = prof.reviews.find(r => r.id === reviewId);
-    if (review) { review.reports = (review.reports || 0) + 1; toast('Reported — an admin will take a look.'); rerender(); }
+  async function reportReview(reviewId) {
+    const review = state.reviews.find(r => r.id === reviewId);
+    if (!review) return;
+    try {
+      await db.reportReview(reviewId, review.reports);
+      review.reports = (review.reports || 0) + 1;
+      toast('Reported — an admin will take a look.');
+      rerender();
+    } catch (e) { toast('Could not send the report — check your connection.'); }
   }
 
   function copyCode(code) {
@@ -1266,23 +1310,27 @@
     rerender();
   }
 
-  function modDecision(target, approve) {
+  async function modDecision(target, approve) {
     const type = target.getAttribute('data-type');
     const id = target.getAttribute('data-id');
-    if (type === 'post') {
-      const p = state.posts.find(x => x.id === id);
-      if (p) { if (approve) p.status = 'approved'; else state.posts = state.posts.filter(x => x.id !== id); }
-    } else if (type === 'comment') {
-      const postId = target.getAttribute('data-post');
-      const post = state.posts.find(x => x.id === postId);
-      if (post) { const c = post.comments.find(x => x.id === id); if (approve && c) c.status = 'approved'; else post.comments = post.comments.filter(x => x.id !== id); }
-    } else if (type === 'review') {
-      const profId = target.getAttribute('data-post');
-      const prof = state.professors.find(x => x.id === profId);
-      if (prof) { const r = prof.reviews.find(x => x.id === id); if (approve && r) { r.status = 'approved'; r.reports = 0; } else prof.reviews = prof.reviews.filter(x => x.id !== id); }
-    }
-    toast(approve ? 'Approved.' : 'Removed.');
-    rerender();
+    try {
+      if (type === 'post') {
+        await db.modDecidePost(id, approve);
+        const p = state.posts.find(x => x.id === id);
+        if (p) { if (approve) p.status = 'approved'; else state.posts = state.posts.filter(x => x.id !== id); }
+      } else if (type === 'comment') {
+        const postId = target.getAttribute('data-post');
+        await db.modDecideComment(id, approve);
+        const post = state.posts.find(x => x.id === postId);
+        if (post) { const c = post.comments.find(x => x.id === id); if (approve && c) c.status = 'approved'; else post.comments = post.comments.filter(x => x.id !== id); }
+      } else if (type === 'review') {
+        await db.modDecideReview(id, approve);
+        const r = state.reviews.find(x => x.id === id);
+        if (approve && r) { r.status = 'approved'; r.reports = 0; } else state.reviews = state.reviews.filter(x => x.id !== id);
+      }
+      toast(approve ? 'Approved.' : 'Removed.');
+      rerender();
+    } catch (e) { toast('That action failed — check your connection and try again.'); }
   }
 
   // ========================================================
@@ -1316,5 +1364,62 @@
   });
   window.addEventListener('hashchange', () => { ui.route = location.hash.replace('#', '') || 'home'; render(); });
 
+  // ---------- shared-data bootstrap ----------
+  function debounce(fn, ms) {
+    let t;
+    return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+  }
+
+  // sequence guards: an in-flight fetch that resolves after a newer one would otherwise
+  // clobber more recent local state (e.g. a comment just added) with stale server data
+  let postsFetchSeq = 0;
+  let reviewsFetchSeq = 0;
+
+  async function refetchPosts() {
+    const seq = ++postsFetchSeq;
+    try {
+      const posts = await db.fetchPosts();
+      if (seq !== postsFetchSeq) return;
+      state.posts = posts;
+      state.postsOffline = false;
+      rerender();
+    } catch (e) { if (seq === postsFetchSeq) { state.postsOffline = true; rerender(); } }
+  }
+  async function refetchReviews() {
+    const seq = ++reviewsFetchSeq;
+    try {
+      const reviews = await db.fetchAllReviews();
+      if (seq !== reviewsFetchSeq) return;
+      state.reviews = reviews;
+      rerender();
+    } catch (e) { /* professor reviews just won't refresh this round — not critical */ }
+  }
+  const debouncedRefetchPosts = debounce(refetchPosts, 400);
+  const debouncedRefetchReviews = debounce(refetchReviews, 400);
+
+  async function bootstrapRemoteData() {
+    const pSeq = ++postsFetchSeq;
+    const rSeq = ++reviewsFetchSeq;
+    try {
+      const [posts, myReactions, reviews] = await Promise.all([db.fetchPosts(), db.fetchMyReactions(), db.fetchAllReviews()]);
+      if (pSeq !== postsFetchSeq || rSeq !== reviewsFetchSeq) return; // a live update already landed first
+      state.posts = posts;
+      state.myReactions = myReactions;
+      state.reviews = reviews;
+      state.postsLoading = false;
+      state.postsOffline = false;
+      rerender();
+      db.onChange(['posts', 'comments', 'reactions'], debouncedRefetchPosts);
+      db.onChange(['professor_reviews'], debouncedRefetchReviews);
+    } catch (e) {
+      console.error('UniVerse: could not reach the shared backend', e);
+      state.postsLoading = false;
+      state.postsOffline = true;
+      toast('Live sync is unavailable — showing an empty feed. Posting will retry once reconnected.');
+      rerender();
+    }
+  }
+
   render();
+  bootstrapRemoteData();
 })();
