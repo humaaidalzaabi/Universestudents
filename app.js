@@ -251,7 +251,7 @@
         <h1>Welcome to Your UniVerse.</h1>
         <p>Connect with students, discover campus life, support student businesses, and make the most of your AURAK experience — all in one place.</p>
         <div class="hero-actions">
-          <button class="btn btn-primary" data-action="${state.loggedIn ? 'nav' : 'open-auth'}" data-route="community" data-tab="register">Join UniVerse</button>
+          <button class="btn btn-primary" data-action="open-auth" data-tab="register">Join UniVerse</button>
           <button class="btn btn-outline" data-action="nav" data-route="community">Explore the Community</button>
         </div>
       </div>
