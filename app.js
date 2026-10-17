@@ -237,6 +237,48 @@
   }
 
   // ---------------- HOME ----------------
+  function timeGreeting() {
+    const h = new Date().getHours();
+    if (h < 5) return 'Still up';
+    if (h < 12) return 'Good morning';
+    if (h < 18) return 'Good afternoon';
+    return 'Good evening';
+  }
+
+  function renderDashboardHeader() {
+    const me = state.me;
+    const myPostCount = state.posts.filter(p => p.authorId === 'me').length;
+    const unread = state.notifications.filter(n => n.unread).length;
+    const upcomingCount = state.events.filter(e => e.status === 'approved').length;
+    return `
+    <section class="hero dashboard-hero">
+      <div class="hero-inner" style="max-width:100%">
+        <div style="display:flex;align-items:center;gap:16px;justify-content:space-between;flex-wrap:wrap">
+          <div style="display:flex;align-items:center;gap:14px">
+            ${avatarHtml({ id: 'me', name: me.name, tier: me.tier }, 56)}
+            <div>
+              <span class="eyebrow">${timeGreeting()}, ${CONFIG.SCHOOL} student</span>
+              <h1 style="font-size:1.7rem;margin:4px 0 0">${escapeHtml(me.name || 'Student')}</h1>
+              <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">${tierBadge(me.tier)}${me.major ? `<span class="pill pill-outline">${escapeHtml(me.major)}</span>` : ''}</div>
+            </div>
+          </div>
+          <div class="chip-row">
+            <button class="btn btn-outline btn-sm" data-action="nav" data-route="community">Community</button>
+            <button class="btn btn-outline btn-sm" data-action="nav" data-route="events">Events</button>
+            <button class="btn btn-outline btn-sm" data-action="nav" data-route="professors">Rate My Professor</button>
+            <button class="btn btn-outline btn-sm" data-action="nav" data-route="perks">Perks</button>
+          </div>
+        </div>
+      </div>
+    </section>
+    <div class="grid grid-3" style="margin-top:18px">
+      <div class="card stat-tile"><span class="num tabular">${myPostCount}</span><span class="label">Your posts</span></div>
+      <div class="card stat-tile"><span class="num tabular">${unread}</span><span class="label">Unread notifications</span></div>
+      <div class="card stat-tile"><span class="num tabular">${upcomingCount}</span><span class="label">Upcoming events</span></div>
+    </div>
+    `;
+  }
+
   function pageHome() {
     const trending = [...state.posts].filter(p => p.status === 'approved').sort((a, b) => b.likes - a.likes).slice(0, 2);
     const upcoming = state.events.filter(e => e.status === 'approved').slice(0, 2);
@@ -244,7 +286,7 @@
     const ratedProfs = state.professors.filter(p => realReviews(p).length > 0);
     const topProf = ratedProfs.length ? [...ratedProfs].sort((a, b) => avgRating(b) - avgRating(a))[0] : null;
 
-    return `
+    const heroBlock = state.loggedIn ? renderDashboardHeader() : `
     <section class="hero">
       <div class="hero-inner">
         <span class="eyebrow">${CONFIG.SCHOOL} · student community</span>
@@ -255,7 +297,10 @@
           <button class="btn btn-outline" data-action="nav" data-route="community">Explore the Community</button>
         </div>
       </div>
-    </section>
+    </section>`;
+
+    return `
+    ${heroBlock}
 
     <section class="section freshmen-banner">
       <div>
