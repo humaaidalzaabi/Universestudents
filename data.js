@@ -132,7 +132,36 @@ const db = (function () {
     return channel;
   }
 
+  // ---------- real accounts (Supabase Auth) ----------
+  async function signUp(email, password) {
+    const { data, error } = await client.auth.signUp({ email, password });
+    if (error) throw error;
+    return { user: data.user, session: data.session };
+  }
+  async function signIn(email, password) {
+    const { data, error } = await client.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+    return data.user;
+  }
+  async function signOut() {
+    await client.auth.signOut();
+  }
+  async function getSession() {
+    const { data } = await client.auth.getSession();
+    return data.session;
+  }
+  async function saveProfile(userId, profile) {
+    const { error } = await client.from('profiles').upsert({ id: userId, ...profile, updated_at: new Date().toISOString() });
+    if (error) throw error;
+  }
+  async function fetchProfile(userId) {
+    const { data, error } = await client.from('profiles').select('*').eq('id', userId).maybeSingle();
+    if (error) throw error;
+    return data;
+  }
+
   return {
+    signUp, signIn, signOut, getSession, saveProfile, fetchProfile,
     fetchPosts, fetchMyReactions, submitPost, submitComment, react, modDecidePost, modDecideComment,
     fetchAllReviews, submitReview, reportReview, modDecideReview, onChange,
   };
