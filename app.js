@@ -39,7 +39,7 @@
   // ---------- state ----------
   function defaultState() {
     return {
-      loggedIn: true,
+      loggedIn: false,
       me: {
         id: 'me', name: 'Alex Student', major: '', year: 'Freshman',
         bio: 'New here and finding my way around AURAK — say hi!',
@@ -83,7 +83,7 @@
     openDropdown: null,
     modal: null,
     modalData: {},
-    auth: { tab: 'login', step: 1, email: '', tier: 'free', draft: {} },
+    auth: { tab: 'login', step: 1, tier: 'free', draft: {}, error: '', busy: false, draftEmail: '', userId: null },
     businessCategory: 'All',
     eventView: 'list',
     profSearch: '', profDept: 'All', expandedProf: null,
@@ -929,6 +929,7 @@
     const tab = ui.auth.tab || 'login';
     const step = ui.auth.step || 1;
     const back = `<div style="max-width:440px;margin:16px auto 0"><button class="see-all" data-action="nav" data-route="home">← Back to Home</button></div>`;
+    const busy = !!ui.auth.busy;
     if (tab === 'login') {
       return back + authWrap('Log In to UniVerse', `
         <img src="logo-full.png" alt="UniVerse" class="auth-logo" />
@@ -936,10 +937,10 @@
           <button class="active" data-action="auth-tab" data-tab="login">Log In</button>
           <button data-action="auth-tab" data-tab="register">Register</button>
         </div>
-        <div class="field"><label>University Email</label><input id="login-email" placeholder="yourname${CONFIG.EMAIL_DOMAIN}"/></div>
+        <div class="field"><label>University Email</label><input id="login-email" placeholder="yourname${CONFIG.EMAIL_DOMAIN}" value="${escapeHtml(ui.auth.draftEmail || '')}"/></div>
         <div class="field"><label>Password</label><input type="password" id="login-pass" placeholder="••••••••"/></div>
-        <button class="btn btn-primary" style="width:100%" data-action="do-login">Log In</button>
-        <p class="field-hint" style="margin-top:10px">Demo login — any password works once your profile exists.</p>
+        <p id="auth-error" class="field-hint" style="color:var(--danger)">${escapeHtml(ui.auth.error || '')}</p>
+        <button class="btn btn-primary" style="width:100%" data-action="do-login" ${busy ? 'disabled' : ''}>${busy ? 'Logging in…' : 'Log In'}</button>
       `);
     }
     // register flow
@@ -950,19 +951,12 @@
           <button data-action="auth-tab" data-tab="login">Log In</button>
           <button class="active" data-action="auth-tab" data-tab="register">Register</button>
         </div>
-        <span class="eyebrow">Step 1 of 3 — Verify your email</span>
-        <div class="field" style="margin-top:10px"><label>AURAK University Email</label><input id="reg-email" placeholder="yourname${CONFIG.EMAIL_DOMAIN}"/></div>
-        <p id="reg-email-error" class="field-hint" style="color:var(--danger)"></p>
-        <button class="btn btn-primary" style="width:100%" data-action="reg-send-code">Send Verification Code</button>
-      `);
-    }
-    if (step === 2) {
-      return back + authWrap('Join UniVerse', `
-        <span class="eyebrow">Step 2 of 3 — Enter your code</span>
-        <p class="field-hint" style="margin:10px 0">We texted a 6-digit code to ${escapeHtml(ui.auth.email || '')}. (Demo: enter <b>123456</b>.)</p>
-        <div class="field"><label>Verification Code</label><input id="reg-code" placeholder="123456"/></div>
-        <p id="reg-code-error" class="field-hint" style="color:var(--danger)"></p>
-        <button class="btn btn-primary" style="width:100%" data-action="reg-verify-code">Verify</button>
+        <span class="eyebrow">Step 1 of 2 — Create your account</span>
+        <div class="field" style="margin-top:10px"><label>AURAK University Email</label><input id="reg-email" placeholder="yourname${CONFIG.EMAIL_DOMAIN}" value="${escapeHtml(ui.auth.draftEmail || '')}"/></div>
+        <div class="field"><label>Password</label><input type="password" id="reg-pass" placeholder="At least 8 characters"/></div>
+        <div class="field"><label>Confirm Password</label><input type="password" id="reg-pass-confirm" placeholder="Retype your password"/></div>
+        <p id="auth-error" class="field-hint" style="color:var(--danger)">${escapeHtml(ui.auth.error || '')}</p>
+        <button class="btn btn-primary" style="width:100%" data-action="reg-create-account" ${busy ? 'disabled' : ''}>${busy ? 'Creating account…' : 'Continue'}</button>
       `);
     }
     const draft = ui.auth.draft || {};
@@ -971,7 +965,7 @@
     const dYear = draft.year !== undefined ? draft.year : 'Freshman';
     const dBio = draft.bio !== undefined ? draft.bio : '';
     return back + authWrap('Join UniVerse', `
-      <span class="eyebrow">Step 3 of 3 — Build your profile</span>
+      <span class="eyebrow">Step 2 of 2 — Build your profile</span>
       <div class="field" style="margin-top:10px"><label>Display Name</label><input id="reg-name" value="${escapeHtml(dName)}"/></div>
       <div class="field-row">
         <div class="field"><label>Major (optional)</label><select id="reg-major"><option value="">— Undeclared —</option>${MAJORS.map(m => `<option ${dMajor === m ? 'selected' : ''}>${m}</option>`).join('')}</select></div>
@@ -984,7 +978,7 @@
           <button class="${ui.auth.tier === 'premium' ? 'active' : ''}" data-action="reg-set-tier" data-tier="premium">Premium (${premiumPriceLabel()})</button>
         </div>
       </div>
-      <button class="btn btn-primary" style="width:100%" data-action="reg-finish">Create My Account</button>
+      <button class="btn btn-primary" style="width:100%" data-action="reg-finish" ${busy ? 'disabled' : ''}>${busy ? 'Saving…' : 'Create My Account'}</button>
     `);
   }
 
@@ -1069,16 +1063,15 @@
         rerender();
         break;
       }
-      case 'open-auth': ui.auth = { tab: target.getAttribute('data-tab') || 'login', step: 1, email: '', tier: 'free', draft: {} }; ui.openDropdown = null; go('auth'); break;
-      case 'auth-tab': ui.auth = { tab: target.getAttribute('data-tab'), step: 1, email: '', tier: 'free', draft: {} }; rerender(); break;
+      case 'open-auth': ui.auth = { tab: target.getAttribute('data-tab') || 'login', step: 1, tier: 'free', draft: {}, error: '', busy: false, draftEmail: '', userId: null }; ui.openDropdown = null; go('auth'); break;
+      case 'auth-tab': ui.auth = { tab: target.getAttribute('data-tab'), step: 1, tier: 'free', draft: {}, error: '', busy: false, draftEmail: '', userId: null }; rerender(); break;
       case 'close-modal': ui.modal = null; ui.modalData = {}; rerender(); break;
       case 'close-modal-backdrop': if (rawTarget === target) { ui.modal = null; ui.modalData = {}; rerender(); } break;
       case 'toggle-tier': setTier(isPremium() ? 'free' : 'premium'); break;
       case 'set-tier': setTier(target.getAttribute('data-tier')); break;
-      case 'logout': state.loggedIn = false; ui.openDropdown = null; toast('Logged out. Your profile stays saved on this device.'); break;
+      case 'logout': state.loggedIn = false; ui.openDropdown = null; toast('Logged out.'); db.signOut(); break;
       case 'do-login': doLogin(); break;
-      case 'reg-send-code': regSendCode(); break;
-      case 'reg-verify-code': regVerifyCode(); break;
+      case 'reg-create-account': regCreateAccount(); break;
       case 'reg-set-tier': captureRegDraft(); ui.auth.tier = target.getAttribute('data-tier'); rerender(); break;
       case 'reg-finish': regFinish(); break;
       case 'react': reactToPost(id, target.getAttribute('data-kind')); break;
@@ -1146,42 +1139,102 @@
     ui.auth.draft = { name: name.value, major: major.value, year: year.value, bio: bio.value };
   }
 
-  function doLogin() {
-    const email = document.getElementById('login-email').value.trim();
-    if (!email) { toast('Enter your university email to continue.'); return; }
-    state.loggedIn = true;
-    toast(`Welcome back, ${state.me.name}!`);
-    go('home');
+  // this demo has no real account lookup, so a first-time "Log In" derives a display
+  // name from the email instead of showing the placeholder default
+  function nameFromEmail(email) {
+    const local = email.split('@')[0] || '';
+    const words = local.split(/[._\-0-9]+/).filter(Boolean);
+    if (!words.length) return '';
+    return words.map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
   }
 
-  function regSendCode() {
-    const email = document.getElementById('reg-email').value.trim();
-    const errEl = document.getElementById('reg-email-error');
-    if (!email.toLowerCase().endsWith(CONFIG.EMAIL_DOMAIN)) {
-      errEl.textContent = `Please use your ${CONFIG.EMAIL_DOMAIN} university email.`;
-      return;
+  function authErrorMessage(err) {
+    const msg = (err && err.message) || 'Something went wrong — try again.';
+    if (/invalid login credentials/i.test(msg)) return 'Wrong email or password.';
+    if (/already registered|already exists/i.test(msg)) return 'An account with that email already exists — try logging in instead.';
+    if (/password.*at least/i.test(msg)) return 'Password must be at least 6 characters.';
+    return msg;
+  }
+
+  async function doLogin() {
+    const email = document.getElementById('login-email').value.trim();
+    const password = document.getElementById('login-pass').value;
+    ui.auth.draftEmail = email;
+    if (!email || !password) { ui.auth.error = 'Enter your email and password.'; rerender(); return; }
+    ui.auth.busy = true; ui.auth.error = ''; rerender();
+    try {
+      const user = await db.signIn(email, password);
+      let profile = null;
+      try { profile = await db.fetchProfile(user.id); } catch (e) { /* no profile row yet */ }
+      if (profile) {
+        state.me = { ...state.me, name: profile.name, major: profile.major || '', year: profile.year || 'Freshman', bio: profile.bio || '', tier: profile.tier || 'free', privacy: profile.privacy || state.me.privacy, customized: true };
+      } else if (!state.me.customized) {
+        const derived = nameFromEmail(email);
+        if (derived) state.me.name = derived;
+        state.me.customized = true;
+      }
+      state.me.id = user.id;
+      state.me.email = email;
+      state.loggedIn = true;
+      ui.auth.busy = false;
+      toast(`Welcome back, ${state.me.name}!`);
+      go('home');
+    } catch (e) {
+      ui.auth.busy = false;
+      ui.auth.error = authErrorMessage(e);
+      rerender();
     }
-    ui.auth.email = email;
-    ui.auth.step = 2;
-    rerender();
   }
-  function regVerifyCode() {
-    const code = document.getElementById('reg-code').value.trim();
-    const errEl = document.getElementById('reg-code-error');
-    if (code.length !== 6) { errEl.textContent = 'Enter the 6-digit code (demo: 123456).'; return; }
-    ui.auth.step = 3;
-    ui.auth.tier = ui.auth.tier || 'free';
-    rerender();
+
+  async function regCreateAccount() {
+    const email = document.getElementById('reg-email').value.trim();
+    const password = document.getElementById('reg-pass').value;
+    const confirm = document.getElementById('reg-pass-confirm').value;
+    ui.auth.draftEmail = email;
+    if (!email.toLowerCase().endsWith(CONFIG.EMAIL_DOMAIN)) { ui.auth.error = `Please use your ${CONFIG.EMAIL_DOMAIN} university email.`; rerender(); return; }
+    if (password.length < 8) { ui.auth.error = 'Password must be at least 8 characters.'; rerender(); return; }
+    if (password !== confirm) { ui.auth.error = 'Passwords don’t match.'; rerender(); return; }
+    ui.auth.busy = true; ui.auth.error = ''; rerender();
+    try {
+      const { user, session } = await db.signUp(email, password);
+      if (!session) {
+        ui.auth.busy = false;
+        ui.auth.error = 'Account created, but sign-up needs email confirmation enabled to continue — ask the site owner to turn that off in Supabase, or check your email for a confirmation link.';
+        rerender();
+        return;
+      }
+      ui.auth.userId = user.id;
+      ui.auth.step = 2;
+      ui.auth.busy = false;
+      rerender();
+    } catch (e) {
+      ui.auth.busy = false;
+      ui.auth.error = authErrorMessage(e);
+      rerender();
+    }
   }
-  function regFinish() {
+
+  async function regFinish() {
     const name = document.getElementById('reg-name').value.trim() || 'New Student';
     const major = document.getElementById('reg-major').value;
     const year = document.getElementById('reg-year').value;
-    const bio = document.getElementById('reg-bio').value.trim();
-    state.me = { ...state.me, name, major, year, bio: bio || 'Say hi — I just joined UniVerse!', tier: ui.auth.tier || 'free' };
-    state.loggedIn = true;
-    toast('Welcome to UniVerse! Your student account is verified.');
-    go('home');
+    const bio = document.getElementById('reg-bio').value.trim() || 'Say hi — I just joined UniVerse!';
+    const tier = ui.auth.tier || 'free';
+    ui.auth.busy = true; rerender();
+    try {
+      if (ui.auth.userId) await db.saveProfile(ui.auth.userId, { name, major, year, bio, tier, privacy: state.me.privacy });
+      state.me = { ...state.me, id: ui.auth.userId || state.me.id, email: ui.auth.draftEmail, name, major, year, bio, tier, customized: true };
+      state.loggedIn = true;
+      ui.auth.busy = false;
+      toast('Welcome to UniVerse! Your account is ready.');
+      go('home');
+    } catch (e) {
+      ui.auth.busy = false;
+      toast('Your account was created, but saving your profile failed — you can edit it from My Profile.');
+      state.me = { ...state.me, id: ui.auth.userId || state.me.id, email: ui.auth.draftEmail, name, major, year, bio, tier, customized: true };
+      state.loggedIn = true;
+      go('home');
+    }
   }
 
   async function reactToPost(id, kind) {
@@ -1296,6 +1349,7 @@
     state.me.major = document.getElementById('edit-major').value;
     state.me.year = document.getElementById('edit-year').value;
     state.me.bio = document.getElementById('edit-bio').value.trim();
+    state.me.customized = true;
     ui.modal = null;
     toast('Profile updated.');
     rerender();
@@ -1420,6 +1474,26 @@
     }
   }
 
+  // if a real account session already exists (e.g. they logged in before), pull their
+  // latest server-side profile so a change made on another device shows up here too
+  async function restoreSession() {
+    try {
+      const session = await db.getSession();
+      if (!session || !session.user) return;
+      const user = session.user;
+      let profile = null;
+      try { profile = await db.fetchProfile(user.id); } catch (e) { /* no profile row yet */ }
+      if (profile) {
+        state.me = { ...state.me, name: profile.name, major: profile.major || '', year: profile.year || 'Freshman', bio: profile.bio || '', tier: profile.tier || 'free', privacy: profile.privacy || state.me.privacy, customized: true };
+      }
+      state.me.id = user.id;
+      state.me.email = user.email;
+      state.loggedIn = true;
+      rerender();
+    } catch (e) { /* best-effort only — a stale local login state is harmless */ }
+  }
+
   render();
   bootstrapRemoteData();
+  restoreSession();
 })();
